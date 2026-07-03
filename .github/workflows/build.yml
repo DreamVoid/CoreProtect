@@ -5,6 +5,7 @@ on:
       - master
   pull_request:
     types: [opened, synchronize, reopened]
+  workflow_dispatch:
 jobs:
   build:
     name: Build
@@ -21,3 +22,7 @@ jobs:
           cache: 'maven'
       - name: Build
         run: mvn -B verify
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          path: target/*
