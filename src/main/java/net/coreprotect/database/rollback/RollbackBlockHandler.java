@@ -40,8 +40,8 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 
 import net.coreprotect.bukkit.BukkitAdapter;
-import net.coreprotect.config.ConfigHandler;
 import net.coreprotect.consumer.Queue;
+import net.coreprotect.listener.player.InventoryChangeListener;
 import net.coreprotect.model.BlockGroup;
 import net.coreprotect.model.PendingBlockChange;
 import net.coreprotect.paper.PaperAdapter;
@@ -56,7 +56,7 @@ import net.coreprotect.utility.ErrorReporter;
 
 public class RollbackBlockHandler extends Queue {
 
-    public static boolean processBlockChange(World bukkitWorld, Block block, Object[] row, int rollbackType, boolean clearInventories, Map<Block, PendingBlockChange> chunkChanges, boolean countBlock, Material oldTypeMaterial, Material pendingChangeType, BlockData pendingChangeData, String finalUserString, BlockData rawBlockData, Material changeType, boolean changeBlock, BlockData changeBlockData, ArrayList<Object> meta, BlockData blockData, String rowUser, Material rowType, int rowX, int rowY, int rowZ, int rowTypeRaw, int rowData, int rowAction, int rowWorldId, String blockDataString) {
+    public static boolean processBlockChange(World bukkitWorld, Block block, Object[] row, int rollbackType, boolean clearInventories, Map<Block, PendingBlockChange> chunkChanges, boolean countBlock, Material oldTypeMaterial, Material pendingChangeType, BlockData pendingChangeData, RollbackCounters counters, BlockData rawBlockData, Material changeType, boolean changeBlock, BlockData changeBlockData, ArrayList<Object> meta, BlockData blockData, String rowUser, Material rowType, int rowX, int rowY, int rowZ, int rowTypeRaw, int rowData, int rowAction, int rowWorldId, String blockDataString) {
         int unixtimestamp = (int) (System.currentTimeMillis() / 1000L);
 
         try {
@@ -169,6 +169,7 @@ public class RollbackBlockHandler extends Queue {
                         if (BlockGroup.CONTAINERS.contains(changeType)) {
                             Inventory inventory = BlockUtils.getContainerInventory(block.getState(), false);
                             if (inventory != null) {
+                                InventoryChangeListener.flushPendingContainer(inventory, block.getLocation());
                                 inventory.clear();
                             }
                         }
@@ -234,7 +235,7 @@ public class RollbackBlockHandler extends Queue {
                                 BlockUtils.prepareTypeAndData(chunkChanges, bisectBlock, rowType, null, false);
 
                                 if (countBlock) {
-                                    updateBlockCount(finalUserString, 1);
+                                    counters.addBlocks(1);
                                 }
                             }
                         }
@@ -281,10 +282,11 @@ public class RollbackBlockHandler extends Queue {
                 else if (BlockGroup.SHULKER_BOXES.contains(rowType)) {
                     BlockUtils.prepareTypeAndData(chunkChanges, block, rowType, blockData, false);
                     if (countBlock) {
-                        updateBlockCount(finalUserString, 1);
+                        counters.addBlocks(1);
                     }
                     if (meta != null) {
                         Inventory inventory = BlockUtils.getContainerInventory(block.getState(), false);
+                        InventoryChangeListener.flushPendingContainer(inventory, block.getLocation());
                         for (Object value : meta) {
                             ItemStack item = ItemUtils.unserializeItemStackLegacy(value);
                             if (item != null) {
@@ -297,7 +299,7 @@ public class RollbackBlockHandler extends Queue {
                 else if (rowType == Material.COMMAND_BLOCK || rowType == Material.REPEATING_COMMAND_BLOCK || rowType == Material.CHAIN_COMMAND_BLOCK) { // command block
                     BlockUtils.prepareTypeAndData(chunkChanges, block, rowType, blockData, false);
                     if (countBlock) {
-                        updateBlockCount(finalUserString, 1);
+                        counters.addBlocks(1);
                     }
 
                     if (meta != null) {
@@ -333,7 +335,7 @@ public class RollbackBlockHandler extends Queue {
                 }
                 else if (blockData == null && rowData > 0 && (rowType == Material.IRON_DOOR || BlockGroup.DOORS.contains(rowType))) {
                     if (countBlock) {
-                        updateBlockCount(finalUserString, 1);
+                        counters.addBlocks(1);
                     }
 
                     block.setType(rowType, false);
@@ -373,7 +375,7 @@ public class RollbackBlockHandler extends Queue {
                 }
                 else if (blockData == null && rowData > 0 && (rowType.name().endsWith("_BED"))) {
                     if (countBlock) {
-                        updateBlockCount(finalUserString, 1);
+                        counters.addBlocks(1);
                     }
 
                     block.setType(rowType, false);
@@ -404,7 +406,7 @@ public class RollbackBlockHandler extends Queue {
                 else if (rowType.name().endsWith("_BANNER")) {
                     BlockUtils.prepareTypeAndData(chunkChanges, block, rowType, blockData, false);
                     if (countBlock) {
-                        updateBlockCount(finalUserString, 1);
+                        counters.addBlocks(1);
                     }
 
                     if (meta != null) {
@@ -463,7 +465,7 @@ public class RollbackBlockHandler extends Queue {
 
                     BlockUtils.prepareTypeAndData(chunkChanges, block, rowType, blockData, false);
                     if (countBlock) {
-                        updateBlockCount(finalUserString, 2);
+                        counters.addBlocks(2);
                     }
                     return false;
                 }
@@ -475,7 +477,7 @@ public class RollbackBlockHandler extends Queue {
                         bedData.setPart(Part.HEAD);
                         BlockUtils.prepareTypeAndData(chunkChanges, adjacentBlock, rowType, bedData, false);
                         if (countBlock) {
-                            updateBlockCount(finalUserString, 1);
+                            counters.addBlocks(1);
                         }
                     }
 
@@ -550,25 +552,6 @@ public class RollbackBlockHandler extends Queue {
     }
 
     /**
-     * Update the block count in the rollback hash
-     * 
-     * @param userString
-     *            The username for this rollback
-     * @param increment
-     *            The amount to increment the block count by
-     */
-    protected static void updateBlockCount(String userString, int increment) {
-        int[] rollbackHashData = ConfigHandler.rollbackHash.get(userString);
-        int itemCount = rollbackHashData[0];
-        int blockCount = rollbackHashData[1];
-        int entityCount = rollbackHashData[2];
-        int scannedWorlds = rollbackHashData[4];
-
-        blockCount += increment;
-        ConfigHandler.rollbackHash.put(userString, new int[] { itemCount, blockCount, entityCount, 0, scannedWorlds });
-    }
-
-    /**
      * Apply all pending block changes to the world
      * 
      * @param chunkChanges
@@ -579,17 +562,36 @@ public class RollbackBlockHandler extends Queue {
      *            The user performing the rollback
      */
     public static void applyBlockChanges(Map<Block, PendingBlockChange> chunkChanges, int preview, Player user) {
+        if (preview == 0 || user == null) {
+            applyBlockChanges(chunkChanges, true, true);
+            applyBlockChanges(chunkChanges, true, false);
+            applyBlockChanges(chunkChanges, false, false);
+            applyBlockChanges(chunkChanges, false, true);
+            chunkChanges.clear();
+            return;
+        }
+
         for (Entry<Block, PendingBlockChange> chunkChange : chunkChanges.entrySet()) {
             Block changeBlock = chunkChange.getKey();
             PendingBlockChange change = chunkChange.getValue();
             BlockData changeBlockData = change.blockData();
-            if (preview > 0 && user != null) {
-                Util.sendBlockChange(user, changeBlock.getLocation(), changeBlockData);
-            }
-            else {
-                BlockUtils.setTypeAndData(changeBlock, null, changeBlockData, change.applyPhysics());
-            }
+            Util.sendBlockChange(user, changeBlock.getLocation(), changeBlockData);
         }
         chunkChanges.clear();
+    }
+
+    private static void applyBlockChanges(Map<Block, PendingBlockChange> chunkChanges, boolean airChange, boolean applyPhysics) {
+        for (Entry<Block, PendingBlockChange> chunkChange : chunkChanges.entrySet()) {
+            PendingBlockChange change = chunkChange.getValue();
+            boolean changeToAir = isAirChange(change);
+            if (changeToAir == airChange && change.applyPhysics() == applyPhysics) {
+                BlockUtils.setTypeAndData(chunkChange.getKey(), null, change.blockData(), !changeToAir && applyPhysics);
+            }
+        }
+    }
+
+    private static boolean isAirChange(PendingBlockChange change) {
+        BlockData blockData = change.blockData();
+        return blockData != null && BlockUtils.isAir(blockData.getMaterial());
     }
 }
